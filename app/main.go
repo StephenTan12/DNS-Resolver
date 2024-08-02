@@ -18,6 +18,28 @@ type DNSResponse struct {
 	additionals []DNSResourceRecord
 }
 
+func (r DNSResponse) String() string {
+	responseString := r.header.String()
+
+	for _, question := range r.questions {
+		responseString += question.String()
+	}
+
+	for _, answer := range r.answers {
+		responseString += answer.String()
+	}
+
+	for _, authority := range r.authorities {
+		responseString += authority.String()
+	}
+
+	for _, additional := range r.additionals {
+		responseString += additional.String()
+	}
+
+	return responseString
+}
+
 type DNSHeader struct {
 	ID      [2]byte
 	FLAGS   [2]byte
@@ -27,10 +49,18 @@ type DNSHeader struct {
 	ARCOUNT [2]byte
 }
 
+func (h DNSHeader) String() string {
+	return fmt.Sprintf("%x%x%x%x%x%x", h.ID, h.FLAGS, h.QDCOUNT, h.ANCOUNT, h.NSCOUNT, h.ARCOUNT)
+}
+
 type DNSQuestion struct {
 	QNAME  []byte
 	QTYPE  [2]byte
 	QCLASS [2]byte
+}
+
+func (q DNSQuestion) String() string {
+	return fmt.Sprintf("%x%x%x", q.QNAME, q.QTYPE, q.QCLASS)
 }
 
 type DNSResourceRecord struct {
@@ -40,6 +70,10 @@ type DNSResourceRecord struct {
 	TTL      [4]byte
 	RDLENGTH [2]byte
 	RDATA    []byte
+}
+
+func (r DNSResourceRecord) String() string {
+	return fmt.Sprintf("%x%x%x%x%x%x", r.NAME, r.TYPE, r.CLASS, r.TTL, r.RDLENGTH, r.RDATA)
 }
 
 func main() {
