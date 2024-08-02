@@ -11,9 +11,11 @@ import (
 const HEADER_SIZE = 12
 
 type DNSResponse struct {
-	header    DNSHeader
-	questions []DNSQuestion
-	answers   []DNSAnswer
+	header      DNSHeader
+	questions   []DNSQuestion
+	answers     []DNSResourceRecord
+	authorities []DNSResourceRecord
+	additionals []DNSResourceRecord
 }
 
 type DNSHeader struct {
@@ -31,7 +33,7 @@ type DNSQuestion struct {
 	QCLASS [2]byte
 }
 
-type DNSAnswer struct {
+type DNSResourceRecord struct {
 	NAME     []byte
 	TYPE     [2]byte
 	CLASS    [2]byte
@@ -90,9 +92,13 @@ func sendDNSRequest(data string) {
 
 	formattedResponse := formatDNSResponse(response)
 
-	fmt.Printf("Header ID: %d\n", int(formattedResponse.header.ID[1]))
-	fmt.Printf("Response: %s\n", responseString)
+	fmt.Printf("\nResponse: %s\n", responseString)
 	fmt.Printf("Hex Response:\n%s\n", hex.Dump(response))
+
+	fmt.Printf("Header ID: %d\n", int(formattedResponse.header.ID[1]))
+	fmt.Printf("Answer Count: %d\n", len(formattedResponse.answers))
+	fmt.Printf("Authority Count: %d\n", len(formattedResponse.authorities))
+	fmt.Printf("Additional Count: %d\n", len(formattedResponse.additionals))
 }
 
 func formatDNSResponse(response []byte) DNSResponse {
@@ -101,23 +107,26 @@ func formatDNSResponse(response []byte) DNSResponse {
 	// TODO: use question count from header to determine amount
 	dnsQuestion, questionEndIdx := fetchDNSQuestion(response[HEADER_SIZE:])
 
+	resourceRecordsOffset := HEADER_SIZE + questionEndIdx
+
 	numDnsAnswer := int(binary.BigEndian.Uint16(dnsHeader.ANCOUNT[:]))
-	dnsAnswers := make([]DNSAnswer, numDnsAnswer)
+	numDnsAuthorities := int(binary.BigEndian.Uint16(dnsHeader.NSCOUNT[:]))
+	numDnsAdditionals := int(binary.BigEndian.Uint16(dnsHeader.ARCOUNT[:]))
 
-	answerStart := HEADER_SIZE + questionEndIdx
-	answerOffset := 0
-	for i := 0; i < numDnsAnswer; i++ {
-		dnsAnswer, offset := fetchDNSAnswer(response[answerStart+answerOffset:])
-		dnsAnswers[i] = dnsAnswer
-		answerOffset += offset
-	}
+	dnsAnswers, dnsAnswersOffset := fetchDNSResourceRecords(response, numDnsAnswer, resourceRecordsOffset)
+	resourceRecordsOffset += dnsAnswersOffset
 
-	// TODO: fetch authority and fetch additional records
+	dnsAuthorities, dnsAuthoritiesCount := fetchDNSResourceRecords(response, numDnsAuthorities, resourceRecordsOffset)
+	resourceRecordsOffset += dnsAuthoritiesCount
+
+	dnsAdditionals, _ := fetchDNSResourceRecords(response, numDnsAdditionals, resourceRecordsOffset)
 
 	return DNSResponse{
-		header:    dnsHeader,
-		questions: []DNSQuestion{dnsQuestion},
-		answers:   dnsAnswers,
+		header:      dnsHeader,
+		questions:   []DNSQuestion{dnsQuestion},
+		answers:     dnsAnswers,
+		authorities: dnsAuthorities,
+		additionals: dnsAdditionals,
 	}
 }
 
@@ -149,7 +158,20 @@ func fetchDNSQuestion(questionBytes []byte) (DNSQuestion, int) {
 	}, lengthOfQName + 4
 }
 
-func fetchDNSAnswer(answerBytes []byte) (DNSAnswer, int) {
+func fetchDNSResourceRecords(response []byte, resourceRecordCount int, offset int) ([]DNSResourceRecord, int) {
+	dnsResourceRecords := make([]DNSResourceRecord, resourceRecordCount)
+	resourceRecordOffset := 0
+
+	for i := 0; i < resourceRecordCount; i++ {
+		dnsResourceRecord, offset := fetchDNSResourceRecord(response[offset+resourceRecordOffset:])
+		dnsResourceRecords[i] = dnsResourceRecord
+		resourceRecordOffset += offset
+	}
+
+	return dnsResourceRecords, resourceRecordOffset
+}
+
+func fetchDNSResourceRecord(answerBytes []byte) (DNSResourceRecord, int) {
 	lengthOfName := 2
 
 	if binary.BigEndian.Uint16(answerBytes[:2])>>14 != 0x3 {
@@ -166,7 +188,7 @@ func fetchDNSAnswer(answerBytes []byte) (DNSAnswer, int) {
 	RDLENGTH := [2]byte{answerBytes[lengthOfName+8], answerBytes[lengthOfName+9]}
 	length := int(binary.BigEndian.Uint16(RDLENGTH[:]))
 
-	return DNSAnswer{
+	return DNSResourceRecord{
 		NAME:     answerBytes[:lengthOfName],
 		TYPE:     [2]byte{answerBytes[lengthOfName], answerBytes[lengthOfName+1]},
 		CLASS:    [2]byte{answerBytes[lengthOfName+2], answerBytes[lengthOfName+3]},
