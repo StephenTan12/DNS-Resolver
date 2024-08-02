@@ -90,6 +90,7 @@ func sendDNSRequest(data string) {
 
 	formattedResponse := formatDNSResponse(response)
 
+	fmt.Printf("Header ID: %d\n", int(formattedResponse.header.ID[1]))
 	fmt.Printf("Response: %s\n", responseString)
 	fmt.Printf("Hex Response:\n%s\n", hex.Dump(response))
 }
@@ -99,15 +100,24 @@ func formatDNSResponse(response []byte) DNSResponse {
 
 	// TODO: use question count from header to determine amount
 	dnsQuestion, questionEndIdx := fetchDNSQuestion(response[HEADER_SIZE:])
-	// TODO: use answer count from header to determine amount
-	dnsAnswer := fetchDNSAnswer(response[HEADER_SIZE+questionEndIdx:])
+
+	numDnsAnswer := int(binary.BigEndian.Uint16(dnsHeader.ANCOUNT[:]))
+	dnsAnswers := make([]DNSAnswer, numDnsAnswer)
+
+	answerStart := HEADER_SIZE + questionEndIdx
+	answerOffset := 0
+	for i := 0; i < numDnsAnswer; i++ {
+		dnsAnswer, offset := fetchDNSAnswer(response[answerStart+answerOffset:])
+		dnsAnswers[i] = dnsAnswer
+		answerOffset += offset
+	}
 
 	// TODO: fetch authority and fetch additional records
 
 	return DNSResponse{
 		header:    dnsHeader,
 		questions: []DNSQuestion{dnsQuestion},
-		answers:   []DNSAnswer{dnsAnswer},
+		answers:   dnsAnswers,
 	}
 }
 
@@ -139,22 +149,29 @@ func fetchDNSQuestion(questionBytes []byte) (DNSQuestion, int) {
 	}, lengthOfQName + 4
 }
 
-func fetchDNSAnswer(answerBytes []byte) DNSAnswer {
-	lengthOfName := 0
-	for {
-		if answerBytes[lengthOfName] == 0x00 {
-			break
+func fetchDNSAnswer(answerBytes []byte) (DNSAnswer, int) {
+	lengthOfName := 2
+
+	if binary.BigEndian.Uint16(answerBytes[:2])>>14 != 0x3 {
+		lengthOfName = 0
+		for {
+			if answerBytes[lengthOfName] == 0x00 {
+				break
+			}
+			lengthOfName += 1
 		}
 		lengthOfName += 1
 	}
-	lengthOfName += 1
+
+	RDLENGTH := [2]byte{answerBytes[lengthOfName+8], answerBytes[lengthOfName+9]}
+	length := int(binary.BigEndian.Uint16(RDLENGTH[:]))
 
 	return DNSAnswer{
 		NAME:     answerBytes[:lengthOfName],
 		TYPE:     [2]byte{answerBytes[lengthOfName], answerBytes[lengthOfName+1]},
 		CLASS:    [2]byte{answerBytes[lengthOfName+2], answerBytes[lengthOfName+3]},
 		TTL:      [4]byte{answerBytes[lengthOfName+4], answerBytes[lengthOfName+5], answerBytes[lengthOfName+6], answerBytes[lengthOfName+7]},
-		RDLENGTH: [2]byte{answerBytes[lengthOfName+8], answerBytes[lengthOfName+9]},
-		RDATA:    answerBytes[lengthOfName+10 : binary.BigEndian.Uint16(answerBytes[lengthOfName+8:lengthOfName+9])],
-	}
+		RDLENGTH: RDLENGTH,
+		RDATA:    answerBytes[lengthOfName+10 : lengthOfName+10+length],
+	}, lengthOfName + 10 + length
 }
