@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 )
 
 const HEADER_SIZE = 12
+const DNS_ID = 22
+const ROOT_NAME_SERVER_IP = "198.41.0.4:53"
 
-type DNSResponse struct {
+type DNSPacket struct {
 	header      DNSHeader
 	questions   []DNSQuestion
 	answers     []DNSResourceRecord
@@ -18,22 +22,22 @@ type DNSResponse struct {
 	additionals []DNSResourceRecord
 }
 
-func (r DNSResponse) String() string {
-	responseString := r.header.String()
+func (p DNSPacket) String() string {
+	responseString := p.header.String()
 
-	for _, question := range r.questions {
+	for _, question := range p.questions {
 		responseString += question.String()
 	}
 
-	for _, answer := range r.answers {
+	for _, answer := range p.answers {
 		responseString += answer.String()
 	}
 
-	for _, authority := range r.authorities {
+	for _, authority := range p.authorities {
 		responseString += authority.String()
 	}
 
-	for _, additional := range r.additionals {
+	for _, additional := range p.additionals {
 		responseString += additional.String()
 	}
 
@@ -77,19 +81,82 @@ func (r DNSResourceRecord) String() string {
 }
 
 func main() {
-	requestData := "00160100000100000000000003646e7306676f6f676c6503636f6d0000010001"
+	destinationAddr := ROOT_NAME_SERVER_IP
+	requestDomain := "reddit.com"
+	setRecursion := true
 
-	requestByteData, err := hex.DecodeString(requestData)
+	var dnsQueryPacket DNSPacket
+
+	if setRecursion {
+		dnsQueryPacket = createDNSQuery(requestDomain, 0)
+	} else {
+		dnsQueryPacket = createDNSQuery(requestDomain, 1)
+	}
+
+	requestByteData, err := hex.DecodeString(dnsQueryPacket.String())
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
 
-	sendDNSRequest(string(requestByteData))
+	handleDNSQuery(requestByteData, destinationAddr)
 }
 
-func sendDNSRequest(data string) {
-	destinationAddr := "8.8.8.8:53"
+func handleDNSQuery(byteData []byte, destinationAddr string) {
+	returnPacket := sendDNSQuery(string(byteData), destinationAddr)
+
+	for {
+		if len(returnPacket.answers) != 0 {
+			fmt.Println(formatIPAddrFromRDATA(returnPacket.answers[0].RDATA, -1))
+			break
+		}
+
+		destinationAddr = ""
+
+		var rrAdditional DNSResourceRecord
+
+		for _, additional := range returnPacket.additionals {
+			rrType := binary.BigEndian.Uint16(additional.TYPE[:])
+			if rrType != 1 {
+				continue
+			}
+			rrAdditional = additional
+			break
+		}
+
+		if len(rrAdditional.NAME) == 0 {
+			fmt.Println("No additional resource records")
+			os.Exit(1)
+		}
+
+		destinationAddr = formatIPAddrFromRDATA(rrAdditional.RDATA, 53)
+		returnPacket = sendDNSQuery(string(byteData), destinationAddr)
+	}
+}
+
+func createDNSQuery(requestIPDomain string, setRecursion int) DNSPacket {
+	dnsHeader := DNSHeader{
+		ID:      [2]byte{0, DNS_ID},
+		FLAGS:   [2]byte{byte(setRecursion), 0},
+		QDCOUNT: [2]byte{0, 1},
+		ANCOUNT: [2]byte{0, 0},
+		NSCOUNT: [2]byte{0, 0},
+		ARCOUNT: [2]byte{0, 0},
+	}
+
+	dnsQuestion := DNSQuestion{
+		QNAME:  encodeDomainName(requestIPDomain),
+		QTYPE:  [2]byte{0, 1},
+		QCLASS: [2]byte{0, 1},
+	}
+
+	return DNSPacket{
+		header:    dnsHeader,
+		questions: []DNSQuestion{dnsQuestion},
+	}
+}
+
+func sendDNSQuery(data string, destinationAddr string) DNSPacket {
 
 	udpAddr, err := net.ResolveUDPAddr("udp", destinationAddr)
 	if err != nil {
@@ -105,7 +172,6 @@ func sendDNSRequest(data string) {
 	defer udpConn.Close()
 
 	_, err = udpConn.Write([]byte(data))
-	fmt.Println("sent request")
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -122,20 +188,18 @@ func sendDNSRequest(data string) {
 	fmt.Printf("Receive %d bytes from %s\n", size, source)
 
 	response := buf[:size]
-	responseString := string(response)
 
 	formattedResponse := formatDNSResponse(response)
-
-	fmt.Printf("\nResponse: %s\n", responseString)
-	fmt.Printf("Hex Response:\n%s\n", hex.Dump(response))
 
 	fmt.Printf("Header ID: %d\n", int(formattedResponse.header.ID[1]))
 	fmt.Printf("Answer Count: %d\n", len(formattedResponse.answers))
 	fmt.Printf("Authority Count: %d\n", len(formattedResponse.authorities))
-	fmt.Printf("Additional Count: %d\n", len(formattedResponse.additionals))
+	fmt.Printf("Additional Count: %d\n\n\n", len(formattedResponse.additionals))
+
+	return formattedResponse
 }
 
-func formatDNSResponse(response []byte) DNSResponse {
+func formatDNSResponse(response []byte) DNSPacket {
 	dnsHeader := fetchDNSHeader(response[:HEADER_SIZE])
 
 	// TODO: use question count from header to determine amount
@@ -155,7 +219,7 @@ func formatDNSResponse(response []byte) DNSResponse {
 
 	dnsAdditionals, _ := fetchDNSResourceRecords(response, numDnsAdditionals, resourceRecordsOffset)
 
-	return DNSResponse{
+	return DNSPacket{
 		header:      dnsHeader,
 		questions:   []DNSQuestion{dnsQuestion},
 		answers:     dnsAnswers,
@@ -230,4 +294,43 @@ func fetchDNSResourceRecord(answerBytes []byte) (DNSResourceRecord, int) {
 		RDLENGTH: RDLENGTH,
 		RDATA:    answerBytes[lengthOfName+10 : lengthOfName+10+length],
 	}, lengthOfName + 10 + length
+}
+
+func encodeDomainName(domain string) []byte {
+	domains := strings.Split(domain, ".")
+
+	size := len(domains) + 1
+	for _, label := range domains {
+		size += len(label)
+	}
+
+	buf := make([]byte, size)
+
+	bufIndex := 0
+
+	for _, label := range domains {
+		buf[bufIndex] = uint8(len(label))
+		bufIndex += 1
+
+		for i, char := range label {
+			buf[i+bufIndex] = uint8(char)
+		}
+		bufIndex += len(label)
+	}
+
+	buf[bufIndex] = 0
+
+	return buf
+}
+
+func formatIPAddrFromRDATA(RDATA []byte, port int) string {
+	ipAddr := ""
+	for _, segment := range RDATA {
+		ipAddr += strconv.Itoa(int(segment)) + "."
+	}
+
+	if port == -1 {
+		return ipAddr[:len(ipAddr)-1]
+	}
+	return ipAddr[:len(ipAddr)-1] + ":" + strconv.Itoa(port)
 }
